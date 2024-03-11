@@ -6,7 +6,8 @@ Support for the Black Sea Grain Initiative monitoring.
 
 ## Reproducing this analysis
 
-Create a directory where you would like the data to be stored,
+Sync the `OCHA BSGI Support Office / 2024 / Reporting and IM / Data` SharePoint
+folder to your local machine,
 and point to it using an environment variable called
 `AA_DATA_DIR`.
 

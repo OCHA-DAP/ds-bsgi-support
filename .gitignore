@@ -141,12 +141,9 @@ dmypy.json
 # GDrive credentials
 credentials.json
 token.json
-src/test_gdrive.py
 
-# data
-data
-inputs
-outputs
 
 # DS Store
 .DS_Store
+
+sandbox
