@@ -9,7 +9,7 @@ Support for the Black Sea Grain Initiative monitoring.
 Sync the `OCHA BSGI Support Office / 2024 / Reporting and IM / Data` SharePoint
 folder to your local machine,
 and point to it using an environment variable called
-`AA_DATA_DIR`.
+`BSGI_DATA_DIR`.
 
 Next create a new virtual environment and install the requirements with:
 
