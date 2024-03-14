@@ -77,18 +77,18 @@ container_client = ContainerClient.from_container_url(CONTAINER_URL)
 # load MarineTraffic export CSV
 blob_client = container_client.get_blob_client(str(MT_RAW_PATH))
 data = blob_client.download_blob().readall()
-df = pd.read_csv(StringIO(data.decode("utf-8")), parse_dates=["Ata/atd"])
-df["simple_date"] = df["Ata/atd"].dt.date
-df
+mt_df = pd.read_csv(StringIO(data.decode("utf-8")), parse_dates=["Ata/atd"])
+mt_df["simple_date"] = mt_df["Ata/atd"].dt.date
+mt_df
 ```
 
 ```python3
 # iterate over dates to query UNGP AIS
-# takes about 10s per date once
+# takes about 10s per date once started up
 
 cols = ["mmsi", "imo", "message_type", "latitude", "longitude", "dt_pos_utc", "heading"]
 
-query_dates = list(df["simple_date"].unique())
+query_dates = list(mt_df["simple_date"].unique())
 query_dates.sort()
 query_dates.extend([max(query_dates) + pd.Timedelta(days=x) for x in range(1,4)])
 
@@ -97,7 +97,7 @@ for query_date in query_dates:
     start_time = time.time()
     print(query_date)
     dates = [query_date - pd.Timedelta(days=x) for x in range(4)]
-    dff = df[df["simple_date"].isin(dates)]
+    dff = mt_df[mt_df["simple_date"].isin(dates)]
     mmsi_list = [int(x) for x in dff["Mmsi"].unique()]
     date_path = (
         f"{UNGP_BASEPATH}year={query_date.year}/month={query_date.month:02d}/"
@@ -112,6 +112,42 @@ for query_date in query_dates:
 
 ```python3
 ais_df = pd.concat(dfs, ignore_index=True)
+```
+
+```python3
+ais_df["current_date"] = ais_df["dt_pos_utc"].dt.date
+```
+
+```python3
+# see how many departures there were
+len(mt_df)
+```
+
+```python3
+# see how many unique ships departed
+mt_df["Mmsi"].nunique()
+```
+
+```python3
+# see the ships that departed at least once
+doubled_mmsis = mt_df[mt_df.duplicated(subset="Mmsi")]["Mmsi"].unique()
+```
+
+```python3
+def get_most_recent_port_departure(ais_row):
+    current_date, mmsi = ais_row[["current_date", "mmsi"]]
+    dff = mt_df[(mt_df["simple_date"] <= current_date) & (mt_df["Mmsi"] == mmsi)]
+    # interestingly, the AIS returns some values that are actually
+    # from the previous day (but very close to midnight),
+    # so sometimes the dff is empty, since it's looking a day early
+    if dff.empty:
+        return None
+    return dff["simple_date"].max()
+```
+
+```python3
+# this is definitely not the most efficient way to do this, but it works for now
+ais_df["departure_date"] = ais_df.apply(get_most_recent_port_departure, axis=1)
 ```
 
 ```python3
