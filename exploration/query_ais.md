@@ -101,7 +101,7 @@ for query_date in query_dates:
     mmsi_list = [int(x) for x in dff["Mmsi"].unique()]
     date_path = (
         f"{UNGP_BASEPATH}year={query_date.year}/month={query_date.month:02d}/"
-        "day={query_date.day:02d}"
+        f"day={query_date.day:02d}"
     )
     sp_in = spark.read.parquet(date_path)
     sp_in_f = sp_in.filter(sp_in.mmsi.isin(mmsi_list))[cols]
