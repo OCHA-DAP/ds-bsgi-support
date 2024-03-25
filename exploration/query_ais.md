@@ -8,15 +8,16 @@ jupyter:
       format_version: '1.3'
       jupytext_version: 1.16.1
   kernelspec:
-    display_name: Config template ais-tt (to be removed 2023-03-15)
+    display_name: Config template pyspark3.5 ais2.9
     language: python3
-    name: ais-tt
+    name: pyspark-ais-nosedona-202403
 ---
 
 # Query AIS
 
 ```python3
 import datetime
+import logging
 import os
 import subprocess
 import sys
@@ -25,20 +26,22 @@ from io import StringIO
 from pathlib import Path
 
 import pandas as pd
+from pyspark.sql.utils import AnalysisException
 
 from getpass import getpass
 ```
 
 ```python3
+# suppress Azure verbose logging
+azure_logger = logging.getLogger('azure')
+azure_logger.setLevel(logging.WARNING)
+```
+
+```python3
 # paths for reading and writing files
-# change MT_FILENAME to determine which MarineTraffic export file to use
-MT_FILENAME = "MarineTraffic_Arrivals_departures_Export_2024-03-06.csv"
 
 MT_RAW_DIR = Path("raw/marinetraffic")
 UNGP_RAW_DIR = Path("raw/ungp")
-MT_RAW_PATH = MT_RAW_DIR / MT_FILENAME
-UNGP_FILENAME = f"{MT_RAW_PATH.stem}_ais.csv"
-UNGP_RAW_PATH = UNGP_RAW_DIR / UNGP_FILENAME
 
 # basepath for reading from UNGP
 UNGP_BASEPATH = "s3a://ungp-ais-data-historical-backup/exact-earth-data/transformed/prod/"
@@ -74,11 +77,25 @@ container_client = ContainerClient.from_container_url(CONTAINER_URL)
 ```
 
 ```python3
+blob_list = container_client.list_blobs(name_starts_with=f"{MT_RAW_DIR}/")
+print("Available MarineTraffic export files in blob:")
+for blob in blob_list:
+    print(blob.name.removeprefix("raw/marinetraffic/"))
+```
+
+```python3
+# change MT_FILENAME to determine which MarineTraffic export file to use
+MT_FILENAME = "greater-odesa-arrivals-departures-2024-03-01-2024-03-10-more-than-1-dwt.csv"
+MT_RAW_PATH = MT_RAW_DIR / MT_FILENAME
+```
+
+```python3
 # load MarineTraffic export CSV
 blob_client = container_client.get_blob_client(str(MT_RAW_PATH))
 data = blob_client.download_blob().readall()
 mt_df = pd.read_csv(StringIO(data.decode("utf-8")), parse_dates=["Ata/atd"])
 mt_df["simple_date"] = mt_df["Ata/atd"].dt.date
+mt_df = mt_df.rename(columns={"Mmsi": "mmsi"})
 mt_df
 ```
 
@@ -88,24 +105,86 @@ mt_df
 
 cols = ["mmsi", "imo", "message_type", "latitude", "longitude", "dt_pos_utc", "heading"]
 
+N_EXTRA_DAYS = 30
+
 query_dates = list(mt_df["simple_date"].unique())
 query_dates.sort()
-query_dates.extend([max(query_dates) + pd.Timedelta(days=x) for x in range(1,4)])
+query_dates = (
+    [
+        min(query_dates) - pd.Timedelta(days=x)
+        for x in range(N_EXTRA_DAYS, 0, -1)
+    ] +
+    query_dates +
+    [
+        max(query_dates) + pd.Timedelta(days=x)
+        for x in range(1, N_EXTRA_DAYS + 1)
+    ]
+)
 
 dfs = []
 for query_date in query_dates:
     start_time = time.time()
     print(query_date)
-    dates = [query_date - pd.Timedelta(days=x) for x in range(4)]
-    dff = mt_df[mt_df["simple_date"].isin(dates)]
-    mmsi_list = [int(x) for x in dff["Mmsi"].unique()]
+
+    # Determine relevant departure MMSIs to query,
+    # based on whether they departed within N_EXTRA_DAYS before the query date.
+    departure_dates = [
+        query_date - pd.Timedelta(days=x) for x in range(N_EXTRA_DAYS + 1)
+    ]
+    df_departures = mt_df[
+        (mt_df["simple_date"].isin(departure_dates)) &
+        (mt_df["Port Call Type"] == "DEPARTURE")
+    ]
+    # also, get the most recent departure
+    df_last_departures = (
+        df_departures
+        .groupby("mmsi")["Ata/atd"]
+        .max()
+        .reset_index()
+        .rename(columns={"Ata/atd": "departure_time"})
+    )
+    # display(df_last_departures)
+    departure_mmsis = [int(x) for x in df_last_departures["mmsi"]]
+
+    # determine relevant arrival MMSIs to query,
+    # based on whether they arrived within N_EXTRA_DAYS after the query date
+    arrival_dates = [
+        query_date + pd.Timedelta(days=x) for x in range(N_EXTRA_DAYS + 1)
+    ]
+    df_arrivals = mt_df[
+        (mt_df["simple_date"].isin(arrival_dates)) &
+        (mt_df["Port Call Type"] == "ARRIVAL")
+    ]
+    # also, get the earliest arrival
+    df_first_arrivals = (
+        df_arrivals
+        .groupby("mmsi")["Ata/atd"]
+        .min()
+        .reset_index()
+        .rename(columns={"Ata/atd": "arrival_time"})
+    )
+    # display(df_first_arrivals)
+    arrival_mmsis = [int(x) for x in df_first_arrivals["mmsi"]]
+
+    mmsi_list = arrival_mmsis + departure_mmsis
+
     date_path = (
         f"{UNGP_BASEPATH}year={query_date.year}/month={query_date.month:02d}/"
         f"day={query_date.day:02d}"
     )
-    sp_in = spark.read.parquet(date_path)
+    try:
+        sp_in = spark.read.parquet(date_path)
+    except AnalysisException as e:
+        print(f"Data does not exist for {query_date}")
+        continue
+
     sp_in_f = sp_in.filter(sp_in.mmsi.isin(mmsi_list))[cols]
     df_in = sp_in_f.toPandas()
+
+    # add arrival and departure dates
+    df_in = df_in.merge(df_last_departures, on="mmsi", how="left")
+    df_in = df_in.merge(df_first_arrivals, on="mmsi", how="left")
+
     dfs.append(df_in)
     print("duration:", f"{time.time() - start_time:.0f}s")
 ```
@@ -115,51 +194,16 @@ ais_df = pd.concat(dfs, ignore_index=True)
 ```
 
 ```python3
-ais_df["current_date"] = ais_df["dt_pos_utc"].dt.date
+# check which ships both arrived and departed
+# possibly mis-identified by MarineTraffic
+ais_df[~ais_df["departure_time"].isnull() & ~ais_df["arrival_time"].isnull()].groupby("mmsi").first()
 ```
 
 ```python3
-# see how many departures there were
-len(mt_df)
-```
+UNGP_FILENAME = f"{MT_RAW_PATH.stem}_ais.csv"
+UNGP_RAW_PATH = UNGP_RAW_DIR / UNGP_FILENAME
 
-```python3
-# see how many unique ships departed
-mt_df["Mmsi"].nunique()
-```
-
-```python3
-# see the ships that departed at least once
-doubled_mmsis = mt_df[mt_df.duplicated(subset="Mmsi")]["Mmsi"].unique()
-```
-
-```python3
-def get_most_recent_port_departure(ais_row):
-    current_date, mmsi = ais_row[["current_date", "mmsi"]]
-    dff = mt_df[(mt_df["simple_date"] <= current_date) & (mt_df["Mmsi"] == mmsi)]
-    # interestingly, the AIS returns some values that are actually
-    # from the previous day (but very close to midnight),
-    # so sometimes the dff is empty, since it's looking a day early
-    if dff.empty:
-        return None
-    return dff["simple_date"].max()
-```
-
-```python3
-# this is definitely not the most efficient way to do this, but it works for now
-ais_df["departure_date"] = ais_df.apply(get_most_recent_port_departure, axis=1)
-```
-
-```python3
-ais_df
-```
-
-```python3
 data = ais_df.to_csv(index=False)
 blob_client = container_client.get_blob_client(str(UNGP_RAW_PATH))
 blob_client.upload_blob(data, overwrite=True)
-```
-
-```python3
-
 ```
