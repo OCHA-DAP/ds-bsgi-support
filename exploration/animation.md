@@ -80,7 +80,7 @@ def custom_resampler(group, resample_period):
 df_animation = (
     df.set_index("dt_pos_utc")
     .groupby("mmsi")
-    .apply(lambda x: custom_resampler(x, "2h"), include_groups=False)
+    .apply(lambda x: custom_resampler(x, "6h"), include_groups=False)
     .reset_index()
 )
 
@@ -150,6 +150,10 @@ fig.update_layout(
     # height=600,
     showlegend=False,
 )
+
+# fig.layout.updatemenus[0].buttons[0].args[1]["frame"]["duration"] = 100
+# fig.layout.updatemenus[0].buttons[0].args[1]["transition"]["duration"] = 10
+
 fig.show()
 ```
 
